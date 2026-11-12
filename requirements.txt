@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-frontmatter
+rank-bm25
+google-genai
+python-dotenv
+watchdog

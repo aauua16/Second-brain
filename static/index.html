@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Second Brain</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #1e1e2e;
+      --bg2:       #181825;
+      --bg3:       #313244;
+      --accent:    #cba6f7;
+      --accent2:   #9374c2;
+      --text:      #cdd6f4;
+      --text2:     #a6adc8;
+      --muted:     #6c7086;
+      --border:    #313244;
+      --link:      #89b4fa;
+      --green:     #a6e3a1;
+      --yellow:    #f9e2af;
+      --red:       #f38ba8;
+      --sidebar-w: 260px;
+      --chat-w:    340px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+      font-size: 14px;
+    }
+
+    /* ── Sidebar ─────────────────────────────── */
+    #sidebar {
+      width: var(--sidebar-w);
+      min-width: var(--sidebar-w);
+      background: var(--bg2);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-header {
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--accent);
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+    }
+
+    .search-wrap {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    #searchInput {
+      width: 100%;
+      padding: 6px 10px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    #searchInput:focus { border-color: var(--accent); }
+    #searchInput::placeholder { color: var(--muted); }
+
+    #fileTree, #searchResults {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+    #searchResults { display: none; }
+
+    /* folder */
+    .folder-label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    .folder-label:hover { color: var(--text2); }
+    .folder-arrow { font-size: 9px; transition: transform 0.15s; display: inline-block; }
+    .folder-label.closed .folder-arrow { transform: rotate(-90deg); }
+
+    .folder-notes { overflow: hidden; }
+
+    .note-item {
+      padding: 4px 14px 4px 28px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text2);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-radius: 5px;
+      margin: 1px 6px;
+    }
+    .note-item:hover { background: var(--bg3); color: var(--text); }
+    .note-item.active { background: var(--bg3); color: var(--accent); }
+
+    /* search results */
+    .sr-item {
+      padding: 8px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+    }
+    .sr-item:hover { background: var(--bg3); }
+    .sr-name { font-size: 13px; font-weight: 500; }
+    .sr-snippet { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* ── Main ────────────────────────────────── */
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    #noteHeader {
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      flex-shrink: 0;
+    }
+
+    #noteTitle {
+      font-size: 17px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .btn {
+      padding: 5px 13px;
+      border-radius: 7px;
+      border: none;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-accent { background: var(--accent); color: #1e1e2e; }
+    .btn-accent:hover { opacity: 0.85; }
+
+    #noteBody {
+      flex: 1;
+      overflow-y: auto;
+      padding: 32px 48px 60px;
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 14px;
+      color: var(--muted);
+    }
+    .empty-icon { font-size: 52px; opacity: 0.4; }
+
+    /* ── Markdown ────────────────────────────── */
+    .md { max-width: 760px; line-height: 1.75; }
+
+    .md h1 { font-size: 1.75em; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; margin: 1.2em 0 0.5em; }
+    .md h2 { font-size: 1.35em; margin: 1.2em 0 0.4em; }
+    .md h3 { font-size: 1.1em;  margin: 1em 0 0.3em; }
+    .md h4, .md h5, .md h6 { margin: 0.8em 0 0.3em; }
+
+    .md p  { margin: 0.7em 0; }
+    .md ul, .md ol { padding-left: 1.6em; margin: 0.5em 0; }
+    .md li { margin: 0.25em 0; }
+
+    .md a { color: var(--link); text-decoration: none; }
+    .md a:hover { text-decoration: underline; }
+
+    .md code {
+      background: var(--bg2);
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 0.875em;
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      color: var(--yellow);
+    }
+    .md pre {
+      background: #0d1117;
+      border-radius: 8px;
+      padding: 16px;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    .md pre code { background: none; padding: 0; color: inherit; font-size: 0.85em; }
+
+    .md blockquote {
+      border-left: 3px solid var(--accent2);
+      margin: 1em 0;
+      padding: 4px 16px;
+      color: var(--text2);
+      background: var(--bg2);
+      border-radius: 0 6px 6px 0;
+    }
+
+    .md table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 13px; }
+    .md th, .md td { padding: 7px 12px; border: 1px solid var(--border); }
+    .md th { background: var(--bg2); font-weight: 600; }
+    .md tr:hover td { background: var(--bg2); }
+
+    .md hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
+
+    .md img { max-width: 100%; border-radius: 6px; margin: 0.5em 0; }
+
+    /* wiki link */
+    .wl {
+      color: var(--accent);
+      cursor: pointer;
+      border-bottom: 1px dotted var(--accent2);
+      text-decoration: none;
+    }
+    .wl:hover { opacity: 0.75; }
+
+    /* obsidian tag */
+    .ob-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      background: rgba(166,227,161,0.12);
+      color: var(--green);
+      border-radius: 10px;
+      font-size: 12px;
+      margin: 0 1px;
+    }
+
+    /* callout */
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: rgba(203,166,247,0.08);
+      border-radius: 0 6px 6px 0;
+      padding: 10px 14px;
+      margin: 1em 0;
+    }
+    .callout-title { font-weight: 700; font-size: 13px; color: var(--accent); margin-bottom: 4px; }
+
+    /* backlinks */
+    .backlinks { margin-top: 52px; padding-top: 20px; border-top: 1px solid var(--border); }
+    .backlinks-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 10px; }
+    .bl-chip {
+      display: inline-block;
+      padding: 3px 10px;
+      margin: 3px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--link);
+      cursor: pointer;
+    }
+    .bl-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── AI Chat panel ───────────────────────── */
+    #chatPanel {
+      width: var(--chat-w);
+      min-width: var(--chat-w);
+      background: var(--bg2);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .chat-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .icon-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; padding: 2px 4px; border-radius: 4px; }
+    .icon-btn:hover { color: var(--text); background: var(--bg3); }
+
+    #chatMessages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .msg { display: flex; flex-direction: column; }
+
+    .msg.user .bubble {
+      background: var(--accent);
+      color: #1e1e2e;
+      border-radius: 14px 14px 4px 14px;
+      padding: 8px 12px;
+      font-size: 13px;
+      align-self: flex-end;
+      max-width: 90%;
+      word-break: break-word;
+    }
+
+    .msg.ai .bubble {
+      background: var(--bg3);
+      color: var(--text);
+      border-radius: 14px 14px 14px 4px;
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+
+    .msg.ai .bubble strong { color: var(--accent); }
+    .msg.ai .bubble code {
+      background: var(--bg2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+      color: var(--yellow);
+    }
+
+    .sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .src-chip {
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .src-chip:hover { border-color: var(--link); color: var(--link); }
+
+    .chat-footer {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      flex-shrink: 0;
+    }
+
+    #chatHint { font-size: 11px; color: var(--muted); }
+
+    .chat-row { display: flex; gap: 7px; }
+
+    #chatInput {
+      flex: 1;
+      padding: 8px 11px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      min-height: 36px;
+      max-height: 110px;
+    }
+    #chatInput:focus { border-color: var(--accent); }
+    #chatInput::placeholder { color: var(--muted); }
+
+    #sendBtn {
+      padding: 8px 14px;
+      background: var(--accent);
+      color: #1e1e2e;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      align-self: flex-end;
+    }
+    #sendBtn:hover { opacity: 0.85; }
+    #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* loading dots */
+    .dots { display: inline-flex; gap: 4px; }
+    .dots span { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: bop 0.6s infinite alternate; }
+    .dots span:nth-child(2) { animation-delay: 0.2s; }
+    .dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bop { to { transform: translateY(-5px); opacity: 0.5; } }
+
+    /* scrollbars */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+
+<!-- ── Sidebar ────────────────────────────── -->
+<div id="sidebar">
+  <div class="sidebar-header">
+    🧠 Second Brain
+    <button id="wikiBtn" onclick="rebuildWiki()" title="Wiki を再構築" style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--muted);padding:2px 4px;border-radius:4px;margin-left:auto" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">🔄</button>
+  </div>
+  <div class="search-wrap">
+    <input id="searchInput" type="text" placeholder="🔍 ノートを検索...">
+  </div>
+  <div id="fileTree"></div>
+  <div id="searchResults"></div>
+</div>
+
+<!-- ── Main ──────────────────────────────── -->
+<div id="main">
+  <div id="noteHeader">
+    <span id="noteTitle" style="color:var(--muted)">ノートを選択</span>
+    <button id="askBtn" class="btn btn-accent" style="display:none" onclick="askAboutNote()">🤖 このノートについて聞く</button>
+  </div>
+  <div id="noteBody">
+    <div class="empty-state">
+      <div class="empty-icon">📚</div>
+      <div>左のサイドバーからノートを選択してください</div>
+      <div style="font-size:12px">検索やAIチャットも使えます</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── AI Chat ────────────────────────────── -->
+<div id="chatPanel">
+  <div class="chat-header">
+    <span>🤖 AI アシスタント</span>
+    <button class="icon-btn" title="クリア" onclick="clearChat()">🗑</button>
+  </div>
+  <div id="chatMessages">
+    <div class="msg ai">
+      <div class="bubble">こんにちは！ノートについて何でも聞いてください。<br>現在開いているノートと関連ノートを参考に回答します。</div>
+    </div>
+  </div>
+  <div class="chat-footer">
+    <div id="chatHint">ノートを開くとその内容を参考に回答します</div>
+    <div class="chat-row">
+      <textarea id="chatInput" rows="1" placeholder="質問を入力… (Enter で送信)"></textarea>
+      <button id="sendBtn" onclick="sendChat()">送信</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ──────────────────────────────────────────
+let currentPath = null;
+let allNotes    = [];
+let searchTimer = null;
+
+// ─── Init ───────────────────────────────────────────
+async function init() {
+  try {
+    const r = await fetch('/api/notes');
+    allNotes = await r.json();
+    renderTree(allNotes);
+  } catch(e) {
+    document.getElementById('fileTree').innerHTML =
+      '<div style="padding:16px;color:var(--red);font-size:12px">ノートの読み込みに失敗しました</div>';
+  }
+}
+
+// ─── File tree ──────────────────────────────────────
+function renderTree(notes) {
+  const folders = {};
+  for (const n of notes) {
+    const f = n.folder || '';
+    if (!folders[f]) folders[f] = [];
+    folders[f].push(n);
+  }
+
+  // Sort: wiki folder first, then alphabetical
+  const sorted = Object.entries(folders).sort(([a], [b]) => {
+    const aw = a === 'wiki' || a.startsWith('wiki/');
+    const bw = b === 'wiki' || b.startsWith('wiki/');
+    if (aw && !bw) return -1;
+    if (!aw && bw) return 1;
+    return a.localeCompare(b, 'ja');
+  });
+
+  let html = '';
+  for (const [folder, ns] of sorted) {
+    const isWiki = folder === 'wiki' || folder.startsWith('wiki/');
+    const label = folder ? folder.split('/').pop() : 'ルート';
+    const icon = isWiki ? '📚' : '📁';
+    const id = 'f' + hashStr(folder);
+    const labelStyle = isWiki ? ' style="color:var(--accent)"' : '';
+    html += `
+      <div>
+        <div class="folder-label" onclick="toggleFolder('${id}')"${labelStyle}>
+          <span class="folder-arrow">▼</span> ${icon} ${esc(label)}
+          <span style="color:var(--muted);font-size:10px;margin-left:auto">${ns.length}</span>
+        </div>
+        <div class="folder-notes" id="${id}">
+          ${ns.map(n => {
+            const noteIcon = n.path.startsWith('wiki/') ? '📋' : '📄';
+            return `<div class="note-item" data-path="${esc(n.path)}" onclick="openNote('${esc(n.path)}')">${noteIcon} ${esc(n.name)}</div>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }
+  document.getElementById('fileTree').innerHTML = html;
+}
+
+function toggleFolder(id) {
+  const el  = document.getElementById(id);
+  const lbl = el.previousElementSibling;
+  const arr = lbl.querySelector('.folder-arrow');
+  if (el.style.display === 'none') {
+    el.style.display = '';
+    arr.style.transform = '';
+    lbl.classList.remove('closed');
+  } else {
+    el.style.display = 'none';
+    arr.style.transform = 'rotate(-90deg)';
+    lbl.classList.add('closed');
+  }
+}
+
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+// ─── Open note ──────────────────────────────────────
+async function openNote(path) {
+  try {
+    const r = await fetch('/api/note?path=' + encodeURIComponent(path));
+    if (!r.ok) return;
+    const note = await r.json();
+
+    currentPath = path;
+    document.getElementById('noteTitle').textContent = note.name;
+    document.getElementById('noteTitle').style.color = '';
+    document.getElementById('askBtn').style.display = '';
+    document.getElementById('chatHint').textContent = `「${note.name}」を参照して回答します`;
+
+    // highlight active note
+    document.querySelectorAll('.note-item').forEach(el =>
+      el.classList.toggle('active', el.dataset.path === path));
+
+    // render markdown
+    const html = renderMd(note.content);
+
+    // backlinks
+    let blHtml = '';
+    if (note.backlinks && note.backlinks.length) {
+      blHtml = `
+        <div class="backlinks">
+          <div class="backlinks-label">🔗 バックリンク (${note.backlinks.length})</div>
+          ${note.backlinks.map(b =>
+            `<span class="bl-chip" onclick="openNote('${esc(b)}')">${esc(b.split('/').pop().replace(/\.md$/, ''))}</span>`
+          ).join('')}
+        </div>`;
+    }
+
+    const body = document.getElementById('noteBody');
+    body.innerHTML = `<div class="md">${html}</div>${blHtml}`;
+    body.scrollTop = 0;
+
+    // syntax highlight
+    body.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+
+    // wire up wiki links
+    body.querySelectorAll('a[data-wl]').forEach(a => {
+      a.onclick = e => { e.preventDefault(); findAndOpen(a.dataset.wl); };
+    });
+
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+// ─── Markdown rendering ─────────────────────────────
+function renderMd(raw) {
+  // 1) Convert [[wikilinks]] → placeholder anchor (parsed by marked as HTML)
+  let src = raw.replace(/\[\[([^\|\]\n]+?)(?:\|([^\]\n]+?))?\]\]/g, (_, target, label) => {
+    const display = esc(label || target);
+    const t = esc(target);
+    return `<a class="wl" href="#" data-wl="${t}">${display}</a>`;
+  });
+
+  // 2) Convert Obsidian callouts: > [!TYPE] Title
+  src = src.replace(/^> \[!(\w+)\]\s*(.*)\n((?:>.*\n?)*)/gm, (_, type, title, body) => {
+    const content = body.replace(/^> ?/gm, '').trim();
+    return `<div class="callout"><div class="callout-title">${type.toUpperCase()}${title ? ' — ' + title : ''}</div>${content}</div>\n`;
+  });
+
+  // 3) Render markdown
+  marked.use({ breaks: true, gfm: true });
+  let html = marked.parse(src);
+
+  // 4) Convert inline #tags in text nodes (simple regex on rendered HTML)
+  html = html.replace(/(?<![a-zA-Z0-9"'=])#([^\s<>#,\.\!\?\;\:\/\\]+)/g, (m, tag) => {
+    if (/^\d+$/.test(tag)) return m; // skip pure numbers
+    return `<span class="ob-tag">#${tag}</span>`;
+  });
+
+  return html;
+}
+
+// ─── Find note by name ──────────────────────────────
+function findAndOpen(name) {
+  const n = allNotes.find(x =>
+    x.name.toLowerCase() === name.toLowerCase() ||
+    x.path.toLowerCase().endsWith('/' + name.toLowerCase() + '.md') ||
+    x.path.toLowerCase() === name.toLowerCase() + '.md'
+  );
+  if (n) openNote(n.path);
+  else alert(`ノート "${name}" が見つかりません`);
+}
+
+// ─── "Ask about this note" button ───────────────────
+function askAboutNote() {
+  if (!currentPath) return;
+  const name = currentPath.split('/').pop().replace(/\.md$/, '');
+  document.getElementById('chatInput').value = `「${name}」の内容をわかりやすく説明してください`;
+  sendChat();
+}
+
+// ─── Search ─────────────────────────────────────────
+document.getElementById('searchInput').addEventListener('input', e => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  const tree = document.getElementById('fileTree');
+  const res  = document.getElementById('searchResults');
+
+  if (!q) {
+    tree.style.display = '';
+    res.style.display  = 'none';
+    return;
+  }
+  searchTimer = setTimeout(async () => {
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const data = await r.json();
+      tree.style.display = 'none';
+      res.style.display  = '';
+      if (!data.length) {
+        res.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:13px">見つかりませんでした</div>';
+        return;
+      }
+      res.innerHTML = data.map(d => `
+        <div class="sr-item" onclick="openNote('${esc(d.path)}')">
+          <div class="sr-name">📄 ${esc(d.name)}</div>
+          <div class="sr-snippet">${esc(d.snippet || '')}</div>
+        </div>`).join('');
+    } catch(err) { console.error(err); }
+  }, 280);
+});
+
+// ─── AI Chat ────────────────────────────────────────
+async function sendChat() {
+  const inp = document.getElementById('chatInput');
+  const msg = inp.value.trim();
+  if (!msg) return;
+
+  inp.value = '';
+  addMsg('user', msg);
+
+  const lid = 'ld' + Date.now();
+  addLoading(lid);
+  document.getElementById('sendBtn').disabled = true;
+
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, note_path: currentPath })
+    });
+    const data = await r.json();
+    document.getElementById(lid)?.remove();
+    if (!r.ok) {
+      addMsg('ai', '❌ APIエラー: ' + (data.detail || r.status));
+    } else {
+      addMsg('ai', data.answer, data.sources || []);
+    }
+  } catch(e) {
+    document.getElementById(lid)?.remove();
+    addMsg('ai', '❌ 接続エラー: ' + e.message);
+  } finally {
+    document.getElementById('sendBtn').disabled = false;
+    scrollChat();
+  }
+}
+
+function addMsg(role, text, sources = []) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  if (role === 'ai') {
+    // simple formatting for AI response
+    bubble.innerHTML = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/`(.+?)`/g, '<code>$1</code>')
+      .replace(/^## (.+)$/gm, '<strong style="font-size:13px;color:var(--accent)">$1</strong>')
+      .replace(/^### (.+)$/gm, '<strong>$1</strong>')
+      .replace(/^- (.+)$/gm, '• $1')
+      .replace(/\n/g, '<br>');
+  } else {
+    bubble.textContent = text;
+  }
+
+  wrap.appendChild(bubble);
+
+  if (sources.length) {
+    const srcDiv = document.createElement('div');
+    srcDiv.className = 'sources';
+    for (const s of sources) {
+      const chip = document.createElement('span');
+      chip.className = 'src-chip';
+      chip.textContent = '📄 ' + s.split('/').pop().replace(/\.md$/, '');
+      chip.title = s;
+      chip.onclick = () => openNote(s);
+      srcDiv.appendChild(chip);
+    }
+    wrap.appendChild(srcDiv);
+  }
+
+  document.getElementById('chatMessages').appendChild(wrap);
+  scrollChat();
+}
+
+function addLoading(id) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ai';
+  wrap.id = id;
+  wrap.innerHTML = '<div class="bubble"><div class="dots"><span></span><span></span><span></span></div></div>';
+  document.getElementById('chatMessages').appendChild(wrap);
+  scrollChat();
+}
+
+function scrollChat() {
+  const el = document.getElementById('chatMessages');
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearChat() {
+  document.getElementById('chatMessages').innerHTML =
+    '<div class="msg ai"><div class="bubble">チャットをクリアしました。何でも質問してください！</div></div>';
+}
+
+// Enter to send (Shift+Enter = newline)
+document.getElementById('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+// Auto-grow textarea
+document.getElementById('chatInput').addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 110) + 'px';
+});
+
+// ─── Wiki rebuild ───────────────────────────────────
+async function rebuildWiki() {
+  const btn = document.getElementById('wikiBtn');
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/wiki/rebuild', { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showToast(`✅ Wiki 再構築完了 (${d.pages} ページ)`);
+      btn.textContent = '✅';
+      const res = await fetch('/api/notes');
+      allNotes = await res.json();
+      renderTree(allNotes);
+    } else {
+      showToast('❌ 再構築失敗: ' + (d.detail || r.status), true);
+      btn.textContent = '❌';
+    }
+  } catch(e) {
+    showToast('❌ 接続エラー', true);
+    btn.textContent = '❌';
+  } finally {
+    setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 2500);
+  }
+}
+
+function showToast(msg, isErr = false) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  Object.assign(t.style, {
+    position: 'fixed', bottom: '20px', left: '50%', transform: 'translateX(-50%)',
+    background: isErr ? 'var(--red)' : 'var(--green)',
+    color: '#1e1e2e', padding: '8px 18px', borderRadius: '8px',
+    fontWeight: '600', fontSize: '13px', zIndex: '9999',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.4)', transition: 'opacity 0.4s',
+  });
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 2800);
+}
+
+// ─── Utils ──────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# 秘密情報・個人設定
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS / エディタ
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/

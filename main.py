@@ -240,7 +240,7 @@ async def rebuild_wiki():
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    relevant = _searcher.search(req.message, top_k=5)
+    relevant = _searcher.search(req.message, top_k=12)
 
     context_parts: List[str] = []
     sources: List[str] = []
@@ -262,7 +262,7 @@ async def chat(req: ChatRequest):
             context_parts.append(f"【関連ノート: {r['path']}】\n{r['content'][:2000]}")
             sources.append(r["path"])
 
-    context = "\n\n".join(context_parts[:5])
+    context = "\n\n".join(context_parts[:13])
 
     prompt = (
         "あなたはObsidianノートを使った学習をサポートするAIアシスタントです。\n"

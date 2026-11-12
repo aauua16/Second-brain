@@ -1,19 +1,24 @@
 /* Second Brain — ブラウザ単体バックエンド
  * index.html を file:// で直接開いたときに使われる。サーバー不要。
  * - Vault は File System Access API（Chrome / Edge）でフォルダ選択
- * - 検索は main/search.py と同じ BM25 + 日本語バイグラム
- * - チャットは Gemini REST API をブラウザから直接呼ぶ（キーは localStorage に保存）
+ * - Vault 全体を文章チャンクに分割して BM25 インデックス化（日本語はバイグラム）
+ * - 質問ごとに「全ノートの全チャンク」から関連箇所を検索し、Gemini に渡して回答させる（RAG）
+ * - Gemini は REST API をブラウザから直接呼ぶ（キーは localStorage に保存）
  */
 const LocalBackend = (() => {
   const DB_NAME = 'second_brain_idb', DB_STORE = 'handles';
   const LS_KEY = 'second_brain_gemini_key', LS_MODEL = 'second_brain_gemini_model';
   const DEFAULT_MODEL = 'gemini-2.0-flash-lite';
+  const CTX_CHARS = 40000;      // 1回の質問で Gemini に渡す抜粋の最大文字数
+  const CTX_CHUNKS = 30;        // 同上・最大チャンク数
+  const PER_NOTE_CHUNKS = 3;    // 1ノートから採用する最大チャンク数
 
   let root = null;
   let list = [];                // [{path, name, folder, handle}]  ← 表示用（wiki含む）
-  let docs = [];                // 検索対象 [{path, name, folder, clean, snippet, fmTags, links}]
-  let postings = new Map();     // token -> [[docIdx, tf], ...]
-  let docLen = [], avgdl = 1, idfCache = new Map(), avgIdf = 0;
+  let docs = [];                // 検索対象ノート [{path, name, folder, clean, fmTags, links}]
+  let chunks = [];              // 検索単位 [{d, head, text}]
+  let postings = new Map();     // token -> [[chunkIdx, tf], ...]
+  let chunkLen = [], avgdl = 1, idfCache = new Map();
   let linksTo = new Map();      // 小文字ノート名 -> [path]
   let progress = () => {};
 
@@ -25,16 +30,14 @@ const LocalBackend = (() => {
     r.onerror = e => rej(e.target.error);
   });
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-  const idbGet = async key => { try {
-    return await withTimeout(idbGetRaw(key), 2000);
-  } catch { return null; } };
-  const idbGetRaw = async key => { {
+  const idbGetRaw = async key => {
     const db = await idb();
-    return await new Promise((res, rej) => {
+    return new Promise((res, rej) => {
       const q = db.transaction(DB_STORE).objectStore(DB_STORE).get(key);
       q.onsuccess = () => res(q.result || null); q.onerror = () => rej(q.error);
     });
-  } };
+  };
+  const idbGet = async key => { try { return await withTimeout(idbGetRaw(key), 2000); } catch { return null; } };
   const idbPut = async (key, val) => {
     const db = await idb();
     return new Promise((res, rej) => {
@@ -44,27 +47,27 @@ const LocalBackend = (() => {
     });
   };
 
-  // ── テキスト処理（search.py の移植） ──
+  // ── テキスト処理 ──
   function tokenize(text) {
-    const chars = Array.from(text.toLowerCase());
+    const cs = Array.from(text.toLowerCase());
     const out = [];
     let i = 0;
-    while (i < chars.length) {
-      const c = chars[i];
+    while (i < cs.length) {
+      const c = cs[i];
       if (c.charCodeAt(0) < 128) {
         if (/[a-z0-9]/.test(c)) {
           let j = i;
-          while (j < chars.length && /[a-z0-9]/.test(chars[j]) && chars[j].charCodeAt(0) < 128) j++;
-          out.push(chars.slice(i, j).join(''));
+          while (j < cs.length && cs[j].charCodeAt(0) < 128 && /[a-z0-9]/.test(cs[j])) j++;
+          out.push(cs.slice(i, j).join(''));
           i = j;
         } else i++;
       } else {
         out.push(c);
-        if (i + 1 < chars.length && chars[i + 1].charCodeAt(0) >= 128) out.push(c + chars[i + 1]);
+        if (i + 1 < cs.length && cs[i + 1].charCodeAt(0) >= 128) out.push(c + cs[i + 1]);
         i++;
       }
     }
-    return out.length ? out : [''];
+    return out;
   }
 
   const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
@@ -80,7 +83,7 @@ const LocalBackend = (() => {
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(/^tags:\s*(.*)$/);
       if (!m) continue;
-      let v = m[1].trim();
+      const v = m[1].trim();
       if (v) return v.replace(/^\[|\]$/g, '').split(',').map(clean).filter(Boolean);
       const tags = [];
       for (let j = i + 1; j < lines.length; j++) {
@@ -100,6 +103,23 @@ const LocalBackend = (() => {
       const t = m[1].trim().split('/').pop().replace(/\.md$/i, '').toLowerCase();
       if (t) out.push(t);
     }
+    return out;
+  }
+
+  // 見出し・段落を尊重しつつ 600〜1500 文字程度のチャンクに分割
+  function chunkText(clean) {
+    const out = [];
+    let head = '', buf = '';
+    const flush = () => { const t = buf.trim(); if (t) out.push({ head, text: t }); buf = ''; };
+    for (const line of clean.split('\n')) {
+      const hm = line.match(/^#{1,6}\s+(.*)$/);
+      if (hm) { if (buf.length >= 300) flush(); head = hm[1].trim(); buf += line + '\n'; continue; }
+      if (buf.length + line.length > 1400 && buf.length >= 600) flush();
+      buf += line + '\n';
+      while (buf.length > 2400) { out.push({ head, text: buf.slice(0, 1600) }); buf = buf.slice(1600); }
+    }
+    flush();
+    if (!out.length) out.push({ head: '', text: '' });
     return out;
   }
 
@@ -123,7 +143,7 @@ const LocalBackend = (() => {
   async function buildIndex() {
     progress('ノートを走査中…');
     await scanList();
-    docs = []; postings = new Map(); docLen = []; linksTo = new Map(); idfCache = new Map();
+    docs = []; chunks = []; postings = new Map(); chunkLen = []; linksTo = new Map(); idfCache = new Map();
     const targets = list.filter(n => !n.path.startsWith('wiki/'));
     let done = 0;
     const slots = new Array(targets.length);
@@ -134,9 +154,9 @@ const LocalBackend = (() => {
         const raw = await (await n.handle.getFile()).text();
         const { fm, body } = splitFm(raw);
         const clean = body.trim();
+        const cks = chunkText(clean.slice(0, 200000)).map(c => ({ ...c, tokens: tokenize(n.name + ' ' + c.head + ' ' + c.text) }));
         slots[idx] = { path: n.path, name: n.name, folder: n.folder, clean: clean.slice(0, 60000),
-          snippet: clean.split(/\s+/).join(' ').slice(0, 250), fmTags: parseFmTags(fm),
-          tokens: tokenize(n.name + ' ' + clean), links: extractLinkTargets(clean) };
+          fmTags: parseFmTags(fm), links: extractLinkTargets(clean), cks };
       } catch (e) { console.warn('skip', n.path, e); }
       if (++done % 25 === 0) progress(`インデックス作成中 ${done}/${targets.length}`);
     }
@@ -147,50 +167,65 @@ const LocalBackend = (() => {
 
     for (const s of slots) {
       if (!s) continue;
-      const idx = docs.length;
+      const d = docs.length;
       docs.push(s);
-      docLen.push(s.tokens.length);
-      const tf = new Map();
-      for (const t of s.tokens) tf.set(t, (tf.get(t) || 0) + 1);
-      for (const [t, f] of tf) {
-        let p = postings.get(t);
-        if (!p) postings.set(t, p = []);
-        p.push([idx, f]);
+      for (const c of s.cks) {
+        const ci = chunks.length;
+        chunks.push({ d, head: c.head, text: c.text });
+        chunkLen.push(c.tokens.length);
+        const tf = new Map();
+        for (const t of c.tokens) tf.set(t, (tf.get(t) || 0) + 1);
+        for (const [t, f] of tf) {
+          let p = postings.get(t);
+          if (!p) postings.set(t, p = []);
+          p.push([ci, f]);
+        }
       }
       for (const l of new Set(s.links)) {
         let a = linksTo.get(l);
         if (!a) linksTo.set(l, a = []);
         a.push(s.path);
       }
-      s.tokens = null;                          // メモリ節約
+      s.cks = null;                             // メモリ節約
     }
-    const N = docs.length;
-    avgdl = N ? docLen.reduce((a, b) => a + b, 0) / N : 1;
-    // rank_bm25 (Okapi) と同じ idf 定義
+    const N = chunks.length;
+    avgdl = N ? chunkLen.reduce((a, b) => a + b, 0) / N : 1;
+    // Okapi BM25 の idf（rank_bm25 と同じ定義）
     let sum = 0; const neg = [];
     for (const [t, p] of postings) {
       const idf = Math.log(N - p.length + 0.5) - Math.log(p.length + 0.5);
       idfCache.set(t, idf); sum += idf; if (idf < 0) neg.push(t);
     }
-    avgIdf = postings.size ? sum / postings.size : 0;
+    const avgIdf = postings.size ? sum / postings.size : 0;
     for (const t of neg) idfCache.set(t, 0.25 * avgIdf);
     progress(null);
   }
 
-  function search(q, topK = 12) {
-    const N = docs.length;
-    if (!N) return [];
-    const scores = new Float64Array(N);
+  // 全チャンクの BM25 スコア
+  function scoreChunks(query) {
+    const scores = new Float64Array(chunks.length);
     const k1 = 1.5, b = 0.75;
-    for (const t of tokenize(q)) {
+    for (const t of tokenize(query)) {
       const p = postings.get(t);
       if (!p) continue;
       const idf = idfCache.get(t);
-      for (const [d, f] of p)
-        scores[d] += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * docLen[d] / avgdl));
+      for (const [c, f] of p)
+        scores[c] += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * chunkLen[c] / avgdl));
     }
-    return Array.from(scores.keys()).sort((a, b2) => scores[b2] - scores[a]).slice(0, topK)
-      .filter(i => scores[i] > 0).map(i => ({ ...docs[i], score: scores[i] }));
+    return scores;
+  }
+
+  // サイドバー検索：ノート単位（最良チャンクのスコア）
+  function searchNotes(q, topK = 12) {
+    if (!chunks.length) return [];
+    const sc = scoreChunks(q);
+    const best = new Map();
+    for (let i = 0; i < sc.length; i++)
+      if (sc[i] > 0 && (!best.has(chunks[i].d) || sc[i] > sc[best.get(chunks[i].d)])) best.set(chunks[i].d, i);
+    return [...best.entries()].sort((a, b) => sc[b[1]] - sc[a[1]]).slice(0, topK).map(([d, ci]) => ({
+      path: docs[d].path, name: docs[d].name, score: sc[ci],
+      snippet: chunks[ci].text.split(/\s+/).join(' ').slice(0, 250),
+    }));
   }
 
   const entry = path => list.find(n => n.path === path);
@@ -199,6 +234,61 @@ const LocalBackend = (() => {
     if (!e) return null;
     const raw = await (await e.handle.getFile()).text();
     return { e, body: splitFm(raw).body.trim() };
+  }
+
+  // ── Gemini ──
+  async function gemini(prompt, extra = {}) {
+    const { key, model } = LB.getSettings();
+    if (!key) throw new Error('Gemini API キーが未設定です（サイドバーの ⚙️ から設定してください）');
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], ...extra }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error('APIエラー: ' + (data.error?.message || res.status));
+    const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+    if (!text) throw new Error('回答が空でした（安全フィルタ等の可能性）');
+    return text;
+  }
+
+  // 質問から検索キーワードを補う（言い換え・関連語・英語表記）。失敗しても無視。
+  async function expandQuery(message) {
+    try {
+      return await gemini(
+        '次の質問に答えるため、個人ノートの全文検索に使うキーワードを日本語と英語で最大12個、' +
+        'カンマ区切りの1行だけで出力してください（説明・記号・改行は不要）。\n質問: ' + message,
+        { generationConfig: { maxOutputTokens: 120, temperature: 0.2 } });
+    } catch { return ''; }
+  }
+
+  // 質問に関連するチャンクを Vault 全体から選ぶ
+  async function retrieve(message, history, skipPath) {
+    const queries = [[message, 1.0]];
+    const lastUser = [...history].reverse().find(h => h.role === 'user');
+    if (lastUser && message.length < 20) queries.push([lastUser.text, 0.6]);   // 「それは?」等の短い追質問
+    const exp = await expandQuery(lastUser && message.length < 20 ? lastUser.text + ' ' + message : message);
+    if (exp) queries.push([exp, 0.7]);
+
+    const total = new Float64Array(chunks.length);
+    for (const [q, w] of queries) {
+      const sc = scoreChunks(q);
+      let mx = 0;
+      for (let i = 0; i < sc.length; i++) if (sc[i] > mx) mx = sc[i];
+      if (mx > 0) for (let i = 0; i < sc.length; i++) total[i] += w * sc[i] / mx;
+    }
+    const order = Array.from(total.keys()).filter(i => total[i] > 0).sort((a, b) => total[b] - total[a]);
+    const perNote = new Map(), picked = [];
+    let chars = 0;
+    for (const i of order) {
+      const c = chunks[i], path = docs[c.d].path;
+      if (path === skipPath) continue;
+      if ((perNote.get(c.d) || 0) >= PER_NOTE_CHUNKS) continue;
+      if (picked.length >= CTX_CHUNKS || chars + c.text.length > CTX_CHARS) continue;
+      perNote.set(c.d, (perNote.get(c.d) || 0) + 1);
+      picked.push(i); chars += c.text.length;
+    }
+    return { picked, expansion: exp };
   }
 
   // ── Wiki 生成（wiki_gen.py の移植） ──
@@ -234,7 +324,6 @@ const LocalBackend = (() => {
     const sortKeys = m => [...m.keys()].sort();
     let count = 0;
 
-    // index
     const L = head('# 📚 Wiki インデックス', `> 自動生成 — ${T}　|　総ノート数: **${notes.length} 件**`);
     L.push('## 📁 フォルダ一覧', '');
     for (const f of sortKeys(folMap)) L.push(`- [[フォルダ/${safe(f)}|${f !== '(root)' ? f : '（ルート）'}]] — ${folMap.get(f).length} 件`);
@@ -245,7 +334,6 @@ const LocalBackend = (() => {
     for (const n of notes.slice(-30).reverse()) L.push(`- [[${n.path}|${n.name}]]${n.folder ? `  \`${n.folder}\`` : ''}`);
     await writeFile(wikiDir, 'インデックス.md', L.join('\n')); count++;
 
-    // tags
     for (const t of sortKeys(tagMap)) {
       const ns = tagMap.get(t);
       if (ns.length < 2) continue;
@@ -262,7 +350,6 @@ const LocalBackend = (() => {
       await writeFile(tagDir, `${safe(t)}.md`, P.join('\n')); count++;
     }
 
-    // folders
     for (const f of sortKeys(folMap)) {
       const ns = folMap.get(f);
       const P = head(`# 📁 ${f !== '(root)' ? f : '（ルート）'}`, `> このフォルダには **${ns.length} 件** のノートがあります — ${T}`);
@@ -278,10 +365,11 @@ const LocalBackend = (() => {
   }
 
   // ── 公開 API（サーバー版と同じ形） ──
-  return {
+  const LB = {
     mode: 'local',
     onProgress(fn) { progress = fn || (() => {}); },
     vaultName: () => (root ? root.name : ''),
+    stats: () => ({ notes: docs.length, chunks: chunks.length }),
     hasKey: () => !!localStorage.getItem(LS_KEY),
     getSettings: () => ({ key: localStorage.getItem(LS_KEY) || '', model: localStorage.getItem(LS_MODEL) || DEFAULT_MODEL }),
     saveSettings(key, model) {
@@ -320,38 +408,41 @@ const LocalBackend = (() => {
       return { path, name: r.e.name, content: r.body, metadata: {}, backlinks };
     },
 
-    async search(q) {
-      return search(q, 12).map(r => ({ path: r.path, name: r.name, snippet: r.snippet, score: r.score }));
-    },
+    async search(q) { return searchNotes(q, 12); },
 
-    async chat(message, notePath) {
-      const { key, model } = this.getSettings();
-      if (!key) throw new Error('Gemini API キーが未設定です（サイドバーの ⚙️ から設定してください）');
+    // history: [{role:'user'|'ai', text}]、opts.preferOpen: 開いているノートを全文で優先して渡すか
+    async chat(message, notePath, history = [], opts = {}) {
       const parts = [], sources = [];
-      if (notePath) {
+      let openPath = null;
+      if (notePath && opts.preferOpen !== false) {
         try {
           const r = await readNote(notePath);
-          if (r) { parts.push(`【現在開いているノート: ${notePath}】\n${r.body.slice(0, 3000)}`); sources.push(notePath); }
+          if (r) { parts.push(`【現在開いているノート: ${notePath}】\n${r.body.slice(0, 6000)}`); sources.push(notePath); openPath = notePath; }
         } catch {}
       }
-      for (const r of search(message, 5))
-        if (!sources.includes(r.path)) { parts.push(`【関連ノート: ${r.path}】\n${r.clean.slice(0, 2000)}`); sources.push(r.path); }
+      const { picked } = await retrieve(message, history, openPath);
+      const byNote = new Map();
+      for (const ci of picked) {
+        const c = chunks[ci];
+        (byNote.get(c.d) || byNote.set(c.d, []).get(c.d)).push(c);
+      }
+      for (const [d, cs] of byNote) {
+        parts.push(`【ノート: ${docs[d].path}】\n` + cs.map(c => (c.head ? `(${c.head}) ` : '') + c.text).join('\n…\n'));
+        sources.push(docs[d].path);
+      }
+      const hist = history.slice(-6).map(h => `${h.role === 'user' ? 'ユーザー' : 'AI'}: ${h.text.slice(0, 600)}`).join('\n');
       const prompt =
-        'あなたはObsidianノートを使った学習をサポートするAIアシスタントです。\n' +
-        '提供されたノートの内容を参考に、わかりやすく日本語で回答してください。\n' +
-        'どのノートから得た情報かを明示し、ノートにない内容は一般知識で補足してください。\n' +
-        '回答は構造化して、見出しや箇条書きを活用してください。\n\n' +
-        `質問: ${message}\n\n参考ノート:\n${parts.slice(0, 5).join('\n\n')}`;
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error('APIエラー: ' + (data.error?.message || res.status));
-      const answer = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-      if (!answer) throw new Error('回答が空でした（安全フィルタ等の可能性）');
-      return { answer, sources };
+        'あなたは、ユーザーの Obsidian Vault（個人ノート集）を読み込んで対話するAIアシスタントです。\n' +
+        '以下は、質問に関連するとして Vault 全体の検索で抽出したノートの抜粋です。\n' +
+        '- 抜粋を根拠に、日本語でわかりやすく回答してください。\n' +
+        '- 根拠にしたノートを【ノート名】の形で明示してください。\n' +
+        '- 複数のノートにまたがる関連・対立・変遷があれば、統合して整理してください。\n' +
+        '- 抜粋に根拠がない場合は、その旨を述べたうえで一般知識で補足し、ノート由来の内容と区別してください。\n' +
+        '- 見出しや箇条書きで構造化してください。\n\n' +
+        (hist ? `これまでの会話:\n${hist}\n\n` : '') +
+        `質問: ${message}\n\n参考ノート（抜粋）:\n${parts.join('\n\n') || '（該当するノートは見つかりませんでした）'}`;
+      const answer = await gemini(prompt);
+      return { answer, sources, stats: { total: docs.length, used: sources.length } };
     },
 
     async rebuildWiki() {
@@ -363,4 +454,5 @@ const LocalBackend = (() => {
 
     async reload() { await buildIndex(); },
   };
+  return LB;
 })();

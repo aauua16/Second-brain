@@ -2,10 +2,9 @@
 
 # 🧠 Second Brain
 
-**Obsidian の Vault を検索し、ノートを根拠に Gemini と対話するローカル Web アプリ。**
+**Obsidian の Vault を丸ごと読み込んだ AI と対話する、ローカルアプリ。**
 
-[![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![HTML](https://img.shields.io/badge/HTML-single%20file-E34F26?logo=html5&logoColor=white)](static/index.html)
 [![Gemini](https://img.shields.io/badge/Gemini-API-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -13,73 +12,58 @@
 
 <p align="center"><img src="docs/screenshot.png" width="800" alt="Second Brain"></p>
 
+画面の主役は **Vault と対話するチャット**です。質問するたびに **Vault 内のすべてのノート**から関連箇所を探し出し、根拠にしたノートを明示して回答します。ノートの閲覧は、必要なときだけ右側に開きます。
+
 ## ✨ Features
 
-- 🔎 **日本語対応の全文検索** — CJK はバイグラム、英数字は単語で分割した BM25 検索
-- 💬 **ノート対話** — 開いているノートと関連ノートを文脈に Gemini が回答し、参照元を明示
-- 🔗 **バックリンク表示** — `[[wikilink]]` から被リンクを自動抽出
-- 📚 **Wiki 自動生成** — Vault 内に `wiki/` ページを生成(ファイル変更を監視して再構築)
-- 🌐 **ブラウザ単体で動作** — HTML を開くだけ(File System Access API)
-- 🧹 **Vault 正規化ツール** — frontmatter と関連リンクを一括付与(`normalize_vault.py`、既定はドライラン)
+- 💬 **Vault 全体と対話** — 全ノートを文章チャンク(見出し・段落単位)に分割して索引化。質問ごとに全チャンクを検索し、関連の高い最大30区画(約4万字)を Gemini に渡して回答
+- 🔎 **キーワード拡張** — 質問を言い換え・関連語・英語表記に展開して検索し、取りこぼしを減らす
+- 🧵 **会話の文脈を保持** — 「それは?」のような追質問も、直前のやり取りを踏まえて検索・回答
+- 📎 **根拠の明示** — 回答の下に参照ノートをチップ表示。クリックで右側にノートを開く
+- 🔗 バックリンク / 日本語対応の全文検索 / Wiki 自動生成(🔄)
+- 🔒 サーバー不要。ノートはこのPC内で処理され、質問時に該当の抜粋だけが Gemini API に送られる
 
-## 🚀 Quick Start
+> 「全ノートを精査」の意味: AI が毎回すべてのノートを読むのではなく、**全ノートを対象に検索して関連箇所を選び出し**、それを読ませる方式(RAG)です。2000 ノート規模でも数秒で索引化できます。
 
-```bash
-git clone https://github.com/aauua16/Second-brain.git
-cd Second-brain
-pip install -r requirements.txt
-cp .env.example .env      # VAULT_PATH と GEMINI_API_KEY を記入
-python -m uvicorn main:app --port 8000
-```
+## 🚀 使い方
 
-Windows なら `start.bat` をダブルクリック。<http://localhost:8000> を開きます。
+### A. アプリとして使う(Windows・おすすめ)
 
-## 📂 サーバーなしで使う(HTMLを直接開く)
+1. [`scripts/install-app.bat`](scripts/install-app.bat) をダブルクリック
+2. デスクトップとスタートメニューに **Second Brain** ができます(専用ウィンドウで起動)
+3. 初回のみ **📂 Vault フォルダを選択**(2回目以降は「再接続」)
+4. **⚙️** に [Gemini API キー](https://aistudio.google.com/apikey)を入力(このアプリ専用のプロファイルにのみ保存)
 
-Python もサーバーも不要です。`static/index.html` を **Chrome / Edge** で開き(`local-backend.js` と同じフォルダに置く)、
+Chrome または Edge が必要です。
 
-1. **📂 Vault フォルダを選択**で Obsidian の Vault を選ぶ(初回のみ。次回以降は「再接続」ボタン)
-2. AI 質問を使うなら **⚙️** で [Gemini API キー](https://aistudio.google.com/apikey)を入力(このブラウザの localStorage にのみ保存)
+### B. HTML を直接開く
 
-検索(BM25)・閲覧・バックリンク・Wiki 生成(🔄)・AI 質問がすべてブラウザ内で動きます。`.env` は不要です。
-
-> サーバー版との違い: ファイル変更の自動監視と、新規ノートへの「関連ノート」自動追記はありません。Wiki は 🔄 を押したときに `wiki/` へ書き出されます。
-
-## ⚙️ Configuration (`.env`) — サーバー版
-
-`.env.example` を `.env` にコピーして編集します(`.env` は Git 管理外)。
-
-```env
-VAULT_PATH=C:\Users\you\Documents\MyVault
-GEMINI_API_KEY=取得したAPIキー
-```
-
-- **`VAULT_PATH`** — Obsidian で開いている Vault のフォルダ(`.obsidian` フォルダがある場所)の絶対パス。中の `.md` を再帰的に読み込み、`wiki/` もここに生成されます。引用符は不要です。
-- **`GEMINI_API_KEY`** — [Google AI Studio](https://aistudio.google.com/apikey) で発行したキーを `=` の右にそのまま貼り付けます。
-
-| 変数 | 説明 |
-| --- | --- |
-| `VAULT_PATH` | Obsidian Vault のルートフォルダ |
-| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) で取得した API キー |
+[`static/index.html`](static/index.html)(と同じフォルダの `local-backend.js`)を Chrome / Edge で開いても動きます。
 
 ## 🗂️ Structure
 
 ```
 second-brain/
-├── main.py             # FastAPI アプリ(API・ファイル監視・チャット)
-├── search.py           # BM25 検索(日本語トークナイザ)
-├── static/local-backend.js  # ブラウザ単体版のバックエンド(検索・Wiki・Gemini)
-├── wiki_gen.py         # wiki ページ生成
-├── normalize_vault.py  # Vault 正規化 CLI
-└── static/index.html   # フロントエンド(サーバー版 / 単体版 兼用)
+├── static/
+│   ├── index.html          # UI(チャット中心)
+│   └── local-backend.js    # 索引・検索・Wiki 生成・Gemini 呼び出し
+├── assets/                 # アイコン
+├── scripts/                # アプリ化(ショートカット作成)
+├── main.py / search.py ... # 旧サーバー版(FastAPI)。任意
+└── LICENSE
 ```
 
 ## 🔐 Security notes
 
-- 単体版では、AI 質問時に該当ノートの一部がブラウザから直接 Gemini API に送られます。API キーは各自のブラウザにのみ保存され、ファイルやリポジトリには含まれません。
-- 認証はありません。既定では `127.0.0.1` のみで待ち受けます(`start.bat`)。LAN 公開する場合は `HOST=0.0.0.0` を設定し、信頼できるネットワークでのみ使ってください。
-- ノート本文は質問のたびに Gemini API へ送信されます。機密ノートを含む Vault では注意してください。
-- `.env`(API キー)は Git 管理外です。
+- API キーは各自のブラウザ(アプリ専用プロファイル)にのみ保存され、ファイルやリポジトリには含まれません。
+- AI 質問時、検索で選ばれたノートの抜粋が Gemini API に送信されます。機密ノートを含む Vault では注意してください。
+- 認証はありません。ローカル利用が前提です。
+
+<details>
+<summary>旧サーバー版(Python / FastAPI)</summary>
+
+`pip install -r requirements.txt` → `.env.example` を `.env` にコピーして `VAULT_PATH` と `GEMINI_API_KEY` を設定 → `start.bat`(`http://localhost:8000`)。単体版にある全ノート横断の強化・会話履歴は、サーバー版には入っていません。
+</details>
 
 ## 📄 License
 

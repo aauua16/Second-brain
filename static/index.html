@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Second Brain</title>
+  <link rel="icon" href="../assets/icon.png">
+<title>Second Brain</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
   <script src="local-backend.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -130,10 +131,12 @@
     .sr-name { font-size: 13px; font-weight: 500; }
     .sr-snippet { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    /* ── Main ────────────────────────────────── */
+    /* ── Main（ノートビューア：開いたときだけ右に表示） ── */
     #main {
-      flex: 1;
-      display: flex;
+      flex: 0 0 46%;
+      display: none;
+      order: 2;
+      border-left: 1px solid var(--border);
       flex-direction: column;
       overflow: hidden;
       min-width: 0;
@@ -172,7 +175,7 @@
     #noteBody {
       flex: 1;
       overflow-y: auto;
-      padding: 32px 48px 60px;
+      padding: 24px 28px 60px;
     }
 
     .empty-state {
@@ -284,15 +287,23 @@
 
     /* ── AI Chat panel ───────────────────────── */
     #chatPanel {
-      width: var(--chat-w);
-      min-width: var(--chat-w);
-      background: var(--bg2);
-      border-left: 1px solid var(--border);
+      flex: 1;
+      min-width: 0;
+      order: 1;
+      background: var(--bg);
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
 
+    body.note-open #main { display: flex; }
+    #chatMessages { padding-left: max(16px, calc((100% - 860px) / 2)) !important; padding-right: max(16px, calc((100% - 860px) / 2)) !important; }
+    .chat-footer { padding-left: max(16px, calc((100% - 860px) / 2)) !important; padding-right: max(16px, calc((100% - 860px) / 2)) !important; }
+    .msg.user .bubble, .msg.ai .bubble { font-size: 14px; }
+    .msg.ai .bubble { max-width: 100%; }
+    .scope-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .scope-row label { font-size: 12px; color: var(--text2); cursor: pointer; display: flex; align-items: center; gap: 5px; }
+    .stat-line { font-size: 11px; color: var(--muted); margin-top: 6px; }
     .chat-header {
       padding: 12px 14px;
       border-bottom: 1px solid var(--border);
@@ -456,7 +467,10 @@
 <div id="main">
   <div id="noteHeader">
     <span id="noteTitle" style="color:var(--muted)">ノートを選択</span>
-    <button id="askBtn" class="btn btn-accent" style="display:none" onclick="askAboutNote()">🤖 このノートについて聞く</button>
+    <span style="display:flex;gap:8px;align-items:center">
+      <button id="askBtn" class="btn btn-accent" style="display:none" onclick="askAboutNote()">🤖 このノートについて聞く</button>
+      <button class="icon-btn" title="閉じる" onclick="closeNote()">✕</button>
+    </span>
   </div>
   <div id="noteBody">
     <div class="empty-state">
@@ -470,18 +484,21 @@
 <!-- ── AI Chat ────────────────────────────── -->
 <div id="chatPanel">
   <div class="chat-header">
-    <span>🤖 AI アシスタント</span>
+    <span>🧠 Vault と対話 <span id="vaultStat" style="font-weight:400;font-size:12px;color:var(--muted);margin-left:6px"></span></span>
     <button class="icon-btn" title="クリア" onclick="clearChat()">🗑</button>
   </div>
   <div id="chatMessages">
     <div class="msg ai">
-      <div class="bubble">こんにちは！ノートについて何でも聞いてください。<br>現在開いているノートと関連ノートを参考に回答します。</div>
+      <div class="bubble">Vault 全体を読み込んで答えます。<br>質問のたびに<strong>すべてのノート</strong>から関連箇所を検索し、根拠にしたノートを明示して回答します。<br><br>例：「〇〇について、私のノートでは何と言っている？」「△△と□□の関連を整理して」</div>
     </div>
   </div>
   <div class="chat-footer">
-    <div id="chatHint">ノートを開くとその内容を参考に回答します</div>
+    <div class="scope-row">
+      <div id="chatHint">対象：Vault 全体</div>
+      <label title="ノートを開いているとき、その全文を優先して渡します"><input type="checkbox" id="preferOpen" checked> 開いているノートを優先</label>
+    </div>
     <div class="chat-row">
-      <textarea id="chatInput" rows="1" placeholder="質問を入力… (Enter で送信)"></textarea>
+      <textarea id="chatInput" rows="1" placeholder="Vault について質問… (Enter で送信 / Shift+Enter で改行)"></textarea>
       <button id="sendBtn" onclick="sendChat()">送信</button>
     </div>
   </div>
@@ -492,6 +509,7 @@
 let currentPath = null;
 let allNotes    = [];
 let searchTimer = null;
+let chatHistory = [];   // [{role:'user'|'ai', text}]
 
 // ─── Backend（サーバー版 / ブラウザ単体版） ────────────
 // file:// で開いたときはサーバー不要の単体版（local-backend.js）を使う
@@ -504,7 +522,7 @@ const ServerBackend = {
     return r.ok ? r.json() : null;
   },
   async search(q) { return (await fetch('/api/search?q=' + encodeURIComponent(q))).json(); },
-  async chat(message, notePath) {
+  async chat(message, notePath) {      // サーバー版は従来どおり（履歴・全体検索の強化は単体版のみ）
     const r = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, note_path: notePath })
@@ -537,6 +555,7 @@ async function init() {
     if (st && st.needsVault) { showConnect(st); return; }
     allNotes = await backend.notes();
     renderTree(allNotes);
+    updateVaultStat();
   } catch(e) {
     tree.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">ノートの読み込みに失敗しました<br>' +
       esc(e.message || '') + '</div>';
@@ -558,6 +577,7 @@ async function connectVault(reuse) {
     await backend.connect(reuse);
     allNotes = await backend.notes();
     renderTree(allNotes);
+    updateVaultStat();
     showToast(`✅ ${allNotes.length} 件のノートを読み込みました`);
     if (!backend.hasKey()) showToast('💡 AI 質問には ⚙️ から API キーを設定してください');
   } catch(e) {
@@ -566,6 +586,24 @@ async function connectVault(reuse) {
 }
 
 function changeVault() { connectVault(false); }
+
+function updateVaultStat() {
+  const el = document.getElementById('vaultStat');
+  if (!el) return;
+  if (backend.mode === 'local' && backend.stats) {
+    const st = backend.stats();
+    el.textContent = `${st.notes} ノート / ${st.chunks} 区画を検索対象`;
+  } else el.textContent = '';
+  document.getElementById('chatHint').textContent = '対象：Vault 全体' + (currentPath ? `（開いているノート: ${currentPath.split('/').pop().replace(/\.md$/, '')}）` : '');
+}
+
+function closeNote() {
+  document.body.classList.remove('note-open');
+  currentPath = null;
+  document.getElementById('askBtn').style.display = 'none';
+  document.querySelectorAll('.note-item').forEach(el => el.classList.remove('active'));
+  updateVaultStat();
+}
 
 function openSettings() {
   const st = backend.getSettings();
@@ -652,7 +690,8 @@ async function openNote(path) {
     document.getElementById('noteTitle').textContent = note.name;
     document.getElementById('noteTitle').style.color = '';
     document.getElementById('askBtn').style.display = '';
-    document.getElementById('chatHint').textContent = `「${note.name}」を参照して回答します`;
+    document.body.classList.add('note-open');
+    updateVaultStat();
 
     // highlight active note
     document.querySelectorAll('.note-item').forEach(el =>
@@ -781,9 +820,13 @@ async function sendChat() {
   document.getElementById('sendBtn').disabled = true;
 
   try {
-    const data = await backend.chat(msg, currentPath);
+    const data = await backend.chat(msg, currentPath, chatHistory.slice(), {
+      preferOpen: document.getElementById('preferOpen').checked
+    });
     document.getElementById(lid)?.remove();
-    addMsg('ai', data.answer, data.sources || []);
+    addMsg('ai', data.answer, data.sources || [], data.stats);
+    chatHistory.push({ role: 'user', text: msg }, { role: 'ai', text: data.answer });
+    if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
   } catch(e) {
     document.getElementById(lid)?.remove();
     addMsg('ai', '❌ ' + e.message);
@@ -793,7 +836,7 @@ async function sendChat() {
   }
 }
 
-function addMsg(role, text, sources = []) {
+function addMsg(role, text, sources = [], stats = null) {
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + role;
 
@@ -829,6 +872,12 @@ function addMsg(role, text, sources = []) {
       srcDiv.appendChild(chip);
     }
     wrap.appendChild(srcDiv);
+    if (stats) {
+      const st = document.createElement('div');
+      st.className = 'stat-line';
+      st.textContent = `🔎 Vault ${stats.total} ノートを検索し、${stats.used} ノートを根拠に回答`;
+      wrap.appendChild(st);
+    }
   }
 
   document.getElementById('chatMessages').appendChild(wrap);
@@ -850,6 +899,7 @@ function scrollChat() {
 }
 
 function clearChat() {
+  chatHistory = [];
   document.getElementById('chatMessages').innerHTML =
     '<div class="msg ai"><div class="bubble">チャットをクリアしました。何でも質問してください！</div></div>';
 }

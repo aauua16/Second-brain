@@ -457,6 +457,16 @@
   <input id="setKey" type="password" autocomplete="off" placeholder="AIza..." style="width:100%;margin:4px 0 12px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
   <label style="font-size:12px;color:var(--text2)">モデル</label>
   <input id="setModel" type="text" style="width:100%;margin:4px 0 14px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
+  <div style="border-top:1px solid var(--border);margin:4px 0 14px;padding-top:12px">
+    <div style="font-weight:700;font-size:13px;margin-bottom:4px">🧭 意味検索（Gemini 埋め込み）</div>
+    <div id="embStatus" style="font-size:12px;color:var(--text2);margin-bottom:6px"></div>
+    <label style="font-size:12px;color:var(--text2);display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="semOn" onchange="backend.setSemantic(this.checked)"> 質問時に意味検索を併用する</label>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn" id="embBuildBtn" onclick="buildEmb()">索引を作成・更新</button>
+      <button class="btn" id="embStopBtn" onclick="backend.cancelEmbeddings()" style="display:none">中断</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">キーワードが一致しなくても、意味の近い箇所を見つけられます。作成は一度だけ（変更分のみ再計算）。途中で中断しても続きから再開できます。</div>
+  </div>
   <div style="display:flex;gap:8px;justify-content:flex-end">
     <button class="btn" onclick="document.getElementById('settingsDlg').close()">キャンセル</button>
     <button class="btn btn-accent" onclick="saveSettings()">保存</button>
@@ -593,7 +603,7 @@ function updateVaultStat() {
   if (!el) return;
   if (backend.mode === 'local' && backend.stats) {
     const st = backend.stats();
-    el.textContent = `${st.notes} ノート / ${st.chunks} 区画を検索対象`;
+    el.textContent = `${st.notes} ノート / ${st.chunks} 区画を検索対象` + (st.embedded ? ` ・ 意味検索 ${Math.round(st.embedded / st.chunks * 100)}%` : '');
   } else el.textContent = '';
   document.getElementById('chatHint').textContent = '対象：Vault 全体' + (currentPath ? `（開いているノート: ${currentPath.split('/').pop().replace(/\.md$/, '')}）` : '');
 }
@@ -610,7 +620,38 @@ function openSettings() {
   const st = backend.getSettings();
   document.getElementById('setKey').value = st.key;
   document.getElementById('setModel').value = st.model;
+  document.getElementById('semOn').checked = backend.stats ? backend.stats().semantic : true;
+  refreshEmbStatus();
   document.getElementById('settingsDlg').showModal();
+}
+
+function refreshEmbStatus() {
+  const el = document.getElementById('embStatus');
+  if (!el || !backend.embStatus) return;
+  const e = backend.embStatus();
+  const pct = e.total ? Math.round(e.covered / e.total * 100) : 0;
+  el.textContent = e.total ? `作成済み ${e.covered} / ${e.total} 区画（${pct}%）` + (e.missing ? ` ・ 未作成 ${e.missing} 区画（約${Math.round(e.chars / 10000)}万文字）` : ' ・ 最新です') : 'Vault を読み込むと利用できます';
+}
+
+async function buildEmb() {
+  const e = backend.embStatus();
+  if (!backend.hasKey()) { showToast('先に API キーを設定・保存してください', true); return; }
+  if (!e.missing) { showToast('意味検索の索引は最新です'); return; }
+  if (!confirm(
+    `Vault のテキスト ${e.missing} 区画（約${Math.round(e.chars / 10000)}万文字）を Gemini の埋め込み API に送信し、意味検索用の索引を作ります。\n\n` +
+    '・無料枠では、入力が Google の製品改善に使われる場合があります。\n' +
+    '・無料枠は利用制限が厳しく、時間がかかることがあります。有料枠では課金が発生します。\n' +
+    '・途中で中断しても、続きから再開できます。\n\n続けますか？')) return;
+  const btn = document.getElementById('embBuildBtn'), stop = document.getElementById('embStopBtn');
+  btn.disabled = true; stop.style.display = '';
+  const st = document.getElementById('embStatus');
+  try {
+    const r = await backend.buildEmbeddings(p => {
+      st.textContent = p.waiting ? `利用制限のため ${p.waiting} 秒待機中…（${p.done}/${p.total}）` : `作成中 ${p.done} / ${p.total} 区画`;
+    });
+    showToast(r.cancelled ? `⏸ 中断しました（${r.done} 区画まで保存済み）` : `✅ 意味検索の索引を作成しました（${r.done} 区画）`);
+  } catch (err) { showToast('❌ ' + (err.message || err), true); }
+  finally { btn.disabled = false; stop.style.display = 'none'; refreshEmbStatus(); updateVaultStat(); }
 }
 function saveSettings() {
   backend.saveSettings(document.getElementById('setKey').value, document.getElementById('setModel').value);
@@ -876,7 +917,7 @@ function addMsg(role, text, sources = [], stats = null) {
     if (stats) {
       const st = document.createElement('div');
       st.className = 'stat-line';
-      st.textContent = `🔎 Vault ${stats.total} ノートを検索し、${stats.used} ノートを根拠に回答`;
+      st.textContent = `🔎 Vault ${stats.total} ノートを検索し、${stats.used} ノートを根拠に回答` + (stats.semantic ? '（意味検索を併用）' : '');
       wrap.appendChild(st);
     }
   }

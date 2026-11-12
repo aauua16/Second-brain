@@ -22,6 +22,30 @@ const LocalBackend = (() => {
   let linksTo = new Map();      // 小文字ノート名 -> [path]
   let progress = () => {};
 
+  // ── 意味検索（Gemini 埋め込み）の状態 ──
+  const EMB_DB = 'second_brain_emb', EMB_STORE = 'vec';
+  const LS_EMB_MODEL = 'second_brain_embed_model', LS_SEM = 'second_brain_semantic';
+  const EMB_DEFAULT_MODEL = 'gemini-embedding-001', EMB_DIM = 768, EMB_BATCH = 100, EMB_CHARS = 1200;
+  let chunkHash = [];           // 区画ごとのキャッシュキー（内容 + モデル + 次元）
+  let chunkVec = [];            // 区画ごとの正規化済みベクトル（未作成は null）
+  let embBuilding = false, embCancel = false;
+  const embModel = () => localStorage.getItem(LS_EMB_MODEL) || EMB_DEFAULT_MODEL;
+  const semanticOn = () => localStorage.getItem(LS_SEM) !== '0';
+  const embCovered = () => { let n = 0; for (const v of chunkVec) if (v) n++; return n; };
+  const embedText = (name, head, text) => (name + (head ? ' / ' + head : '') + '\n' + text).slice(0, EMB_CHARS);
+  function hash53(str, seed = 0) {            // cyrb53
+    let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  }
+  const embKey = text => `${embModel()}|${EMB_DIM}|${hash53(text)}`;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
   // ── IndexedDB（フォルダハンドルの保存） ──
   const idb = () => new Promise((res, rej) => {
     const r = indexedDB.open(DB_NAME, 1);
@@ -144,6 +168,7 @@ const LocalBackend = (() => {
     progress('ノートを走査中…');
     await scanList();
     docs = []; chunks = []; postings = new Map(); chunkLen = []; linksTo = new Map(); idfCache = new Map();
+    chunkHash = []; chunkVec = [];
     const targets = list.filter(n => !n.path.startsWith('wiki/'));
     let done = 0;
     const slots = new Array(targets.length);
@@ -172,6 +197,7 @@ const LocalBackend = (() => {
       for (const c of s.cks) {
         const ci = chunks.length;
         chunks.push({ d, head: c.head, text: c.text });
+        chunkHash.push(embKey(embedText(s.name, c.head, c.text)));
         chunkLen.push(c.tokens.length);
         const tf = new Map();
         for (const t of c.tokens) tf.set(t, (tf.get(t) || 0) + 1);
@@ -198,6 +224,7 @@ const LocalBackend = (() => {
     }
     const avgIdf = postings.size ? sum / postings.size : 0;
     for (const t of neg) idfCache.set(t, 0.25 * avgIdf);
+    try { await loadVectors(); } catch (e) { console.warn('vector cache:', e); }
     progress(null);
   }
 
@@ -277,7 +304,27 @@ const LocalBackend = (() => {
       for (let i = 0; i < sc.length; i++) if (sc[i] > mx) mx = sc[i];
       if (mx > 0) for (let i = 0; i < sc.length; i++) total[i] += w * sc[i] / mx;
     }
-    const order = Array.from(total.keys()).filter(i => total[i] > 0).sort((a, b) => total[b] - total[a]);
+    let order = Array.from(total.keys()).filter(i => total[i] > 0).sort((a, b) => total[b] - total[a]);
+    let usedSemantic = false;
+    if (semanticOn() && embCovered() > 0) {
+      try {
+        const qv = await embedQuery(lastUser && message.length < 20 ? lastUser.text + ' ' + message : message);
+        const sims = [];
+        for (let i = 0; i < chunks.length; i++) {
+          const v = chunkVec[i];
+          if (!v) continue;
+          let sc = 0;
+          for (let k = 0; k < v.length; k++) sc += v[k] * qv[k];
+          sims.push([i, sc]);
+        }
+        sims.sort((a, b) => b[1] - a[1]);
+        const fused = new Map();
+        order.slice(0, 200).forEach((i, r) => fused.set(i, (fused.get(i) || 0) + 1 / (60 + r)));
+        sims.slice(0, 100).forEach(([i], r) => fused.set(i, (fused.get(i) || 0) + 1 / (60 + r)));
+        order = [...fused.keys()].sort((a, b) => fused.get(b) - fused.get(a));
+        usedSemantic = true;
+      } catch (e) { console.warn('semantic search failed (BM25 only):', e); }
+    }
     const perNote = new Map(), picked = [];
     let chars = 0;
     for (const i of order) {
@@ -288,7 +335,99 @@ const LocalBackend = (() => {
       perNote.set(c.d, (perNote.get(c.d) || 0) + 1);
       picked.push(i); chars += c.text.length;
     }
-    return { picked, expansion: exp };
+    return { picked, expansion: exp, usedSemantic };
+  }
+
+  // ── 意味検索：埋め込みの作成・保存・読み込み ──
+  const embDb = () => new Promise((res, rej) => {
+    const r = indexedDB.open(EMB_DB, 1);
+    r.onupgradeneeded = e => e.target.result.createObjectStore(EMB_STORE);
+    r.onsuccess = e => res(e.target.result);
+    r.onerror = e => rej(e.target.error);
+  });
+
+  async function loadVectors() {
+    const db = await withTimeout(embDb(), 3000);
+    const { keys, vals } = await new Promise((res, rej) => {
+      const st = db.transaction(EMB_STORE).objectStore(EMB_STORE);
+      const k = st.getAllKeys(), v = st.getAll();
+      v.onsuccess = () => res({ keys: k.result, vals: v.result });
+      v.onerror = () => rej(v.error);
+    });
+    const m = new Map();
+    keys.forEach((k, i) => m.set(k, vals[i]));
+    chunkVec = chunkHash.map(k => m.get(k) || null);
+  }
+
+  async function saveVectors(entries) {            // [[key, Float32Array], ...]
+    const db = await embDb();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(EMB_STORE, 'readwrite');
+      const st = tx.objectStore(EMB_STORE);
+      for (const [k, v] of entries) st.put(v, k);
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  }
+
+  function normalize(values) {
+    const v = Float32Array.from(values);
+    let n = 0;
+    for (const x of v) n += x * x;
+    n = Math.sqrt(n) || 1;
+    for (let i = 0; i < v.length; i++) v[i] /= n;
+    return v;
+  }
+
+  async function embedCall(method, body, onWait) {
+    const { key } = LB.getSettings();
+    if (!key) throw new Error('Gemini API キーが未設定です（⚙️ から設定してください）');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(embModel())}:${method}`;
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body) });
+      if (res.ok) return res.json();
+      const data = await res.json().catch(() => ({}));
+      if ((res.status === 429 || res.status >= 500) && attempt < 10) {       // 利用制限・一時エラーは待って再試行
+        const wait = Math.min(60, 4 * 2 ** attempt);
+        for (let s = wait; s > 0; s--) {
+          if (embCancel) throw new Error('中断しました');
+          if (onWait) onWait(s, res.status);
+          await sleep(1000);
+        }
+        continue;
+      }
+      throw new Error('埋め込みAPIエラー: ' + (data.error?.message || res.status));
+    }
+  }
+
+  async function embedQuery(text) {
+    const model = 'models/' + embModel();
+    const d = await embedCall('embedContent', { model, content: { parts: [{ text: text.slice(0, EMB_CHARS) }] },
+      taskType: 'RETRIEVAL_QUERY', outputDimensionality: EMB_DIM });
+    return normalize(d.embedding.values);
+  }
+
+  async function buildEmbeddings(onProgress) {
+    if (embBuilding) throw new Error('すでに作成中です');
+    embBuilding = true; embCancel = false;
+    try {
+      const model = 'models/' + embModel();
+      const missing = [];
+      chunkVec.forEach((v, i) => { if (!v) missing.push(i); });
+      let done = 0;
+      for (let b = 0; b < missing.length; b += EMB_BATCH) {
+        if (embCancel) break;
+        const idxs = missing.slice(b, b + EMB_BATCH);
+        const requests = idxs.map(i => ({ model, content: { parts: [{ text: embedText(docs[chunks[i].d].name, chunks[i].head, chunks[i].text) }] },
+          taskType: 'RETRIEVAL_DOCUMENT', outputDimensionality: EMB_DIM }));
+        const d = await embedCall('batchEmbedContents', { requests },
+          (s, code) => onProgress && onProgress({ done, total: missing.length, waiting: s, code }));
+        const entries = idxs.map((i, k) => { const v = normalize(d.embeddings[k].values); chunkVec[i] = v; return [chunkHash[i], v]; });
+        await saveVectors(entries);                      // 1バッチごとに保存＝中断しても続きから再開できる
+        done += idxs.length;
+        if (onProgress) onProgress({ done, total: missing.length });
+      }
+      return { done, total: missing.length, cancelled: embCancel };
+    } finally { embBuilding = false; }
   }
 
   // ── Wiki 生成（wiki_gen.py の移植） ──
@@ -369,7 +508,15 @@ const LocalBackend = (() => {
     mode: 'local',
     onProgress(fn) { progress = fn || (() => {}); },
     vaultName: () => (root ? root.name : ''),
-    stats: () => ({ notes: docs.length, chunks: chunks.length }),
+    stats: () => ({ notes: docs.length, chunks: chunks.length, embedded: embCovered(), semantic: semanticOn() }),
+    embStatus() {
+      let missing = 0, chars = 0;
+      chunkVec.forEach((v, i) => { if (!v) { missing++; chars += embedText(docs[chunks[i].d].name, chunks[i].head, chunks[i].text).length; } });
+      return { total: chunks.length, covered: chunks.length - missing, missing, chars, on: semanticOn(), building: embBuilding, model: embModel() };
+    },
+    setSemantic(on) { localStorage.setItem(LS_SEM, on ? '1' : '0'); },
+    buildEmbeddings,
+    cancelEmbeddings() { embCancel = true; },
     hasKey: () => !!localStorage.getItem(LS_KEY),
     getSettings: () => ({ key: localStorage.getItem(LS_KEY) || '', model: localStorage.getItem(LS_MODEL) || DEFAULT_MODEL }),
     saveSettings(key, model) {
@@ -420,7 +567,7 @@ const LocalBackend = (() => {
           if (r) { parts.push(`【現在開いているノート: ${notePath}】\n${r.body.slice(0, 6000)}`); sources.push(notePath); openPath = notePath; }
         } catch {}
       }
-      const { picked } = await retrieve(message, history, openPath);
+      const { picked, usedSemantic } = await retrieve(message, history, openPath);
       const byNote = new Map();
       for (const ci of picked) {
         const c = chunks[ci];
@@ -442,7 +589,7 @@ const LocalBackend = (() => {
         (hist ? `これまでの会話:\n${hist}\n\n` : '') +
         `質問: ${message}\n\n参考ノート（抜粋）:\n${parts.join('\n\n') || '（該当するノートは見つかりませんでした）'}`;
       const answer = await gemini(prompt);
-      return { answer, sources, stats: { total: docs.length, used: sources.length } };
+      return { answer, sources, stats: { total: docs.length, used: sources.length, semantic: usedSemantic } };
     },
 
     async rebuildWiki() {

@@ -543,6 +543,7 @@ const backend = (location.protocol === 'file:' || new URLSearchParams(location.s
 
 // ─── Init ───────────────────────────────────────────
 async function init() {
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}   // Vault の記憶を自動削除されないように
   const tree = document.getElementById('fileTree');
   if (backend.mode === 'local') {
     document.querySelectorAll('.local-only').forEach(el => el.style.display = '');

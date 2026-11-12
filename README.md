@@ -24,8 +24,8 @@
 ## 🚀 Quick Start
 
 ```bash
-git clone https://github.com/aauua16/second-brain.git
-cd second-brain
+git clone https://github.com/aauua16/Second-brain.git
+cd Second-brain
 pip install -r requirements.txt
 cp .env.example .env      # VAULT_PATH と GEMINI_API_KEY を記入
 python -m uvicorn main:app --port 8000
@@ -34,6 +34,16 @@ python -m uvicorn main:app --port 8000
 Windows なら `start.bat` をダブルクリック。<http://localhost:8000> を開きます。
 
 ## ⚙️ Configuration (`.env`)
+
+`.env.example` を `.env` にコピーして編集します(`.env` は Git 管理外)。
+
+```env
+VAULT_PATH=C:\Users\you\Documents\MyVault
+GEMINI_API_KEY=取得したAPIキー
+```
+
+- **`VAULT_PATH`** — Obsidian で開いている Vault のフォルダ(`.obsidian` フォルダがある場所)の絶対パス。中の `.md` を再帰的に読み込み、`wiki/` もここに生成されます。引用符は不要です。
+- **`GEMINI_API_KEY`** — [Google AI Studio](https://aistudio.google.com/apikey) で発行したキーを `=` の右にそのまま貼り付けます。
 
 | 変数 | 説明 |
 | --- | --- |

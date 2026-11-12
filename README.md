@@ -11,7 +11,7 @@
 
 </div>
 
-<!-- <p align="center"><img src="docs/screenshot.png" width="720" alt="Second Brain"></p> -->
+<p align="center"><img src="docs/screenshot.png" width="800" alt="Second Brain"></p>
 
 ## ✨ Features
 

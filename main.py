@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import frontmatter
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from google import genai
 from dotenv import load_dotenv
@@ -139,6 +139,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     message: str
     note_path: Optional[str] = None
+
+
+@app.get("/local-backend.js")
+async def local_backend_js():
+    return FileResponse("static/local-backend.js", media_type="text/javascript")
 
 
 @app.get("/", response_class=HTMLResponse)

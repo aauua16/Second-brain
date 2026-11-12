@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Second Brain</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script src="local-backend.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
@@ -429,6 +430,8 @@
   <div class="sidebar-header">
     🧠 Second Brain
     <button id="wikiBtn" onclick="rebuildWiki()" title="Wiki を再構築" style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--muted);padding:2px 4px;border-radius:4px;margin-left:auto" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">🔄</button>
+    <button id="vaultBtn" class="local-only" onclick="changeVault()" title="Vault フォルダを選び直す" style="display:none;background:none;border:none;cursor:pointer;font-size:14px;padding:2px 4px">📂</button>
+    <button id="settingsBtn" class="local-only" onclick="openSettings()" title="Gemini API キー設定" style="display:none;background:none;border:none;cursor:pointer;font-size:14px;padding:2px 4px">⚙️</button>
   </div>
   <div class="search-wrap">
     <input id="searchInput" type="text" placeholder="🔍 ノートを検索...">
@@ -436,6 +439,18 @@
   <div id="fileTree"></div>
   <div id="searchResults"></div>
 </div>
+
+<dialog id="settingsDlg" style="margin:auto;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:20px;width:min(420px,92vw)">
+  <div style="font-weight:700;margin-bottom:12px">⚙️ Gemini 設定</div>
+  <label style="font-size:12px;color:var(--text2)">API キー（このブラウザにのみ保存されます）</label>
+  <input id="setKey" type="password" autocomplete="off" placeholder="AIza..." style="width:100%;margin:4px 0 12px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
+  <label style="font-size:12px;color:var(--text2)">モデル</label>
+  <input id="setModel" type="text" style="width:100%;margin:4px 0 14px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn" onclick="document.getElementById('settingsDlg').close()">キャンセル</button>
+    <button class="btn btn-accent" onclick="saveSettings()">保存</button>
+  </div>
+</dialog>
 
 <!-- ── Main ──────────────────────────────── -->
 <div id="main">
@@ -478,16 +493,90 @@ let currentPath = null;
 let allNotes    = [];
 let searchTimer = null;
 
+// ─── Backend（サーバー版 / ブラウザ単体版） ────────────
+// file:// で開いたときはサーバー不要の単体版（local-backend.js）を使う
+const ServerBackend = {
+  mode: 'server',
+  async init() {},
+  async notes() { return (await fetch('/api/notes')).json(); },
+  async note(path) {
+    const r = await fetch('/api/note?path=' + encodeURIComponent(path));
+    return r.ok ? r.json() : null;
+  },
+  async search(q) { return (await fetch('/api/search?q=' + encodeURIComponent(q))).json(); },
+  async chat(message, notePath) {
+    const r = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, note_path: notePath })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error('APIエラー: ' + (data.detail || r.status));
+    return data;
+  },
+  async rebuildWiki() {
+    const r = await fetch('/api/wiki/rebuild', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    return d;
+  },
+};
+// file:// で開いた場合、または ?local を付けた場合は単体版
+const backend = (location.protocol === 'file:' || new URLSearchParams(location.search).has('local')) ? LocalBackend : ServerBackend;
+
 // ─── Init ───────────────────────────────────────────
 async function init() {
+  const tree = document.getElementById('fileTree');
+  if (backend.mode === 'local') {
+    document.querySelectorAll('.local-only').forEach(el => el.style.display = '');
+    backend.onProgress(msg => {
+      if (msg) tree.innerHTML = `<div style="padding:16px;color:var(--text2);font-size:12px">⏳ ${esc(msg)}</div>`;
+    });
+  }
   try {
-    const r = await fetch('/api/notes');
-    allNotes = await r.json();
+    const st = await backend.init();
+    if (st && st.needsVault) { showConnect(st); return; }
+    allNotes = await backend.notes();
     renderTree(allNotes);
   } catch(e) {
-    document.getElementById('fileTree').innerHTML =
-      '<div style="padding:16px;color:var(--red);font-size:12px">ノートの読み込みに失敗しました</div>';
+    tree.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">ノートの読み込みに失敗しました<br>' +
+      esc(e.message || '') + '</div>';
   }
+}
+
+function showConnect(st) {
+  document.getElementById('fileTree').innerHTML = `
+    <div style="padding:16px;font-size:13px;color:var(--text2);line-height:1.7">
+      <div style="margin-bottom:10px">Obsidian の Vault フォルダを選ぶと、サーバーなしで検索・閲覧・AI 質問ができます。</div>
+      ${st.saved ? `<button class="btn btn-accent" style="width:100%;margin-bottom:8px" onclick="connectVault(true)">🔓 「${esc(st.saved)}」に再接続</button>` : ''}
+      <button class="btn ${st.saved ? '' : 'btn-accent'}" style="width:100%" onclick="connectVault(false)">📂 Vault フォルダを選択</button>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted)">※ Chrome / Edge 専用。ノートはこのPC内で処理され、AI 質問時のみ該当ノートの一部が Gemini に送信されます。</div>
+    </div>`;
+}
+
+async function connectVault(reuse) {
+  try {
+    await backend.connect(reuse);
+    allNotes = await backend.notes();
+    renderTree(allNotes);
+    showToast(`✅ ${allNotes.length} 件のノートを読み込みました`);
+    if (!backend.hasKey()) showToast('💡 AI 質問には ⚙️ から API キーを設定してください');
+  } catch(e) {
+    if (e.name !== 'AbortError') showToast('❌ ' + (e.message || e), true);
+  }
+}
+
+function changeVault() { connectVault(false); }
+
+function openSettings() {
+  const st = backend.getSettings();
+  document.getElementById('setKey').value = st.key;
+  document.getElementById('setModel').value = st.model;
+  document.getElementById('settingsDlg').showModal();
+}
+function saveSettings() {
+  backend.saveSettings(document.getElementById('setKey').value, document.getElementById('setModel').value);
+  document.getElementById('settingsDlg').close();
+  showToast('✅ 保存しました');
 }
 
 // ─── File tree ──────────────────────────────────────
@@ -556,9 +645,8 @@ function hashStr(s) {
 // ─── Open note ──────────────────────────────────────
 async function openNote(path) {
   try {
-    const r = await fetch('/api/note?path=' + encodeURIComponent(path));
-    if (!r.ok) return;
-    const note = await r.json();
+    const note = await backend.note(path);
+    if (!note) return;
 
     currentPath = path;
     document.getElementById('noteTitle').textContent = note.name;
@@ -663,8 +751,7 @@ document.getElementById('searchInput').addEventListener('input', e => {
   }
   searchTimer = setTimeout(async () => {
     try {
-      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
-      const data = await r.json();
+      const data = await backend.search(q);
       tree.style.display = 'none';
       res.style.display  = '';
       if (!data.length) {
@@ -694,21 +781,12 @@ async function sendChat() {
   document.getElementById('sendBtn').disabled = true;
 
   try {
-    const r = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, note_path: currentPath })
-    });
-    const data = await r.json();
+    const data = await backend.chat(msg, currentPath);
     document.getElementById(lid)?.remove();
-    if (!r.ok) {
-      addMsg('ai', '❌ APIエラー: ' + (data.detail || r.status));
-    } else {
-      addMsg('ai', data.answer, data.sources || []);
-    }
+    addMsg('ai', data.answer, data.sources || []);
   } catch(e) {
     document.getElementById(lid)?.remove();
-    addMsg('ai', '❌ 接続エラー: ' + e.message);
+    addMsg('ai', '❌ ' + e.message);
   } finally {
     document.getElementById('sendBtn').disabled = false;
     scrollChat();
@@ -793,20 +871,13 @@ async function rebuildWiki() {
   btn.textContent = '⏳';
   btn.disabled = true;
   try {
-    const r = await fetch('/api/wiki/rebuild', { method: 'POST' });
-    const d = await r.json();
-    if (r.ok) {
-      showToast(`✅ Wiki 再構築完了 (${d.pages} ページ)`);
-      btn.textContent = '✅';
-      const res = await fetch('/api/notes');
-      allNotes = await res.json();
-      renderTree(allNotes);
-    } else {
-      showToast('❌ 再構築失敗: ' + (d.detail || r.status), true);
-      btn.textContent = '❌';
-    }
+    const d = await backend.rebuildWiki();
+    showToast(`✅ Wiki 再構築完了 (${d.pages} ページ)`);
+    btn.textContent = '✅';
+    allNotes = await backend.notes();
+    renderTree(allNotes);
   } catch(e) {
-    showToast('❌ 接続エラー', true);
+    showToast('❌ 再構築失敗: ' + (e.message || e), true);
     btn.textContent = '❌';
   } finally {
     setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 2500);

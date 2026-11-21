@@ -138,9 +138,24 @@ app = FastAPI(title="Second Brain", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-4-hydrogen")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+
+
 class ChatRequest(BaseModel):
     message: str
     note_path: Optional[str] = None
+    model: Optional[str] = None   # 画面のプルダウンで選んだモデル（未指定なら DEFAULT_MODEL）
+
+
+def _thinking_config(model: str):
+    """thinking_level は Gemini 3 以降のみ対応。古いモデルに渡すとエラーになるので付けない。"""
+    m = re.match(r"gemini-(\d+)", model)
+    if m and int(m.group(1)) >= 3:
+        return types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level="medium")  # "low"/"medium"/"high"/"xhigh"
+        )
+    return None
 
 
 @app.get("/local-backend.js")
@@ -274,25 +289,26 @@ async def chat(req: ChatRequest):
         f"質問: {req.message}\n\n参考ノート:\n{context}"
     )
 
-    config = types.GenerateContentConfig(
-        thinking_config=types.ThinkingConfig(
-            thinking_level="medium"  # "low", "medium", "high", "xhigh" から選択
-        )
-    )
+    model = (req.model or "").strip() or DEFAULT_MODEL
+    if not _MODEL_RE.match(model):
+        raise HTTPException(status_code=400, detail=f"モデル名が不正です: {model}")
+    config = _thinking_config(model)
     # 503（混雑）/429（レート制限）は一時的なので、待ってから最大3回まで再試行する
     retry_waits = [2, 5, 10]
     for attempt in range(len(retry_waits) + 1):
         try:
             response = _client.models.generate_content(
-                model="gemini-4-hydrogen",
+                model=model,
                 contents=prompt,
                 config=config,
             )
-            return {"answer": response.text, "sources": sources}
+            return {"answer": response.text, "sources": sources, "model": model}
         except Exception as e:
             msg = str(e)
             transient = any(s in msg for s in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "high demand"))
             if transient and attempt < len(retry_waits):
                 await asyncio.sleep(retry_waits[attempt])
                 continue
+            if transient:
+                msg += f"\n（モデル「{model}」が混雑中です。少し待って再送するか、右上のプルダウンで別のモデルに切り替えてください）"
             raise HTTPException(status_code=500, detail=msg)

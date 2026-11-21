@@ -497,8 +497,8 @@
   <div class="chat-header">
     <span>🧠 Vault と対話 <span id="vaultStat" style="font-weight:400;font-size:12px;color:var(--muted);margin-left:6px"></span></span>
     <span style="display:flex;gap:6px;align-items:center">
-      <select id="quickModel" class="local-only" title="使うモデルを切り替え（混雑時は軽いモデルへ）" onchange="switchModel(this.value)"
-        style="display:none;max-width:170px;font-size:11px;padding:3px 4px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px"></select>
+      <select id="quickModel" title="使うモデルを切り替え（混雑時は軽いモデルへ）" onchange="switchModel(this.value)"
+        style="max-width:170px;font-size:11px;padding:3px 4px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px"></select>
       <button class="icon-btn" title="クリア" onclick="clearChat()">🗑</button>
     </span>
   </div>
@@ -525,6 +525,7 @@ let currentPath = null;
 let allNotes    = [];
 let searchTimer = null;
 let chatHistory = [];   // [{role:'user'|'ai', text}]
+const MODEL_PRESETS = ['gemini-4-hydrogen', 'gemini-2.0-flash-lite'];   // 先頭がサーバー版の既定
 
 // ─── Backend（サーバー版 / ブラウザ単体版） ────────────
 // file:// で開いたときはサーバー不要の単体版（local-backend.js）を使う
@@ -537,10 +538,13 @@ const ServerBackend = {
     return r.ok ? r.json() : null;
   },
   async search(q) { return (await fetch('/api/search?q=' + encodeURIComponent(q))).json(); },
+  // モデルはこのブラウザに保存し、質問のたびにサーバーへ渡す（API キーはサーバーの .env）
+  getModel() { try { return localStorage.getItem('second_brain_server_model') || MODEL_PRESETS[0]; } catch { return MODEL_PRESETS[0]; } },
+  setModel(m) { try { localStorage.setItem('second_brain_server_model', m); } catch {} },
   async chat(message, notePath) {      // サーバー版は従来どおり（履歴・全体検索の強化は単体版のみ）
     const r = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, note_path: notePath })
+      body: JSON.stringify({ message, note_path: notePath, model: this.getModel() })
     });
     const data = await r.json();
     if (!r.ok) throw new Error('APIエラー: ' + (data.detail || r.status));
@@ -558,11 +562,11 @@ const backend = (location.protocol === 'file:' || new URLSearchParams(location.s
 
 // ─── Init ───────────────────────────────────────────
 async function init() {
+  renderModelPicker();
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}   // Vault の記憶を自動削除されないように
   const tree = document.getElementById('fileTree');
   if (backend.mode === 'local') {
     document.querySelectorAll('.local-only').forEach(el => el.style.display = '');
-    renderModelPicker();
     backend.onProgress(msg => {
       if (msg) tree.innerHTML = `<div style="padding:16px;color:var(--text2);font-size:12px">⏳ ${esc(msg)}</div>`;
     });
@@ -666,18 +670,18 @@ function saveSettings() {
   showToast('✅ 保存しました');
 }
 
-// ─── モデル切り替え（単体版のみ。サーバー版は main.py で固定） ───
-const MODEL_PRESETS = ['gemini-4-hydrogen', 'gemini-2.0-flash-lite'];
+// ─── モデル切り替え（単体版・サーバー版共通） ───
+function currentModel() { return backend.mode === 'local' ? backend.getSettings().model : backend.getModel(); }
 function renderModelPicker() {
-  if (backend.mode !== 'local') return;
-  const cur = backend.getSettings().model;
+  const cur = currentModel();
   const list = MODEL_PRESETS.includes(cur) ? MODEL_PRESETS : [cur, ...MODEL_PRESETS];
   const sel = document.getElementById('quickModel');
   sel.innerHTML = list.map(m => `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
   document.getElementById('modelPresets').innerHTML = MODEL_PRESETS.map(m => `<option value="${esc(m)}">`).join('');
 }
 function switchModel(model) {
-  backend.saveSettings(backend.getSettings().key, model);
+  if (backend.mode === 'local') backend.saveSettings(backend.getSettings().key, model);
+  else backend.setModel(model);
   showToast('🔁 モデルを ' + model + ' に切り替えました');
 }
 

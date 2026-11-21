@@ -8,7 +8,7 @@
 const LocalBackend = (() => {
   const DB_NAME = 'second_brain_idb', DB_STORE = 'handles';
   const LS_KEY = 'second_brain_gemini_key', LS_MODEL = 'second_brain_gemini_model';
-  const DEFAULT_MODEL = 'gemini-2.0-flash-lite';
+  const DEFAULT_MODEL = 'gemini-4-hydrogen';
   const CTX_CHARS = 40000;      // 1回の質問で Gemini に渡す抜粋の最大文字数
   const CTX_CHUNKS = 30;        // 同上・最大チャンク数
   const PER_NOTE_CHUNKS = 3;    // 1ノートから採用する最大チャンク数
@@ -267,13 +267,24 @@ const LocalBackend = (() => {
   async function gemini(prompt, extra = {}) {
     const { key, model } = LB.getSettings();
     if (!key) throw new Error('Gemini API キーが未設定です（サイドバーの ⚙️ から設定してください）');
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], ...extra }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error('APIエラー: ' + (data.error?.message || res.status));
+    // 503（混雑）/429（レート制限）/500 は一時的なので、待ってから最大3回まで再試行する
+    const RETRY_WAITS = [2000, 5000, 10000];
+    let res, data;
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], ...extra }),
+      });
+      data = await res.json().catch(() => ({}));
+      if (res.ok || ![429, 500, 503].includes(res.status) || attempt >= RETRY_WAITS.length) break;
+      await new Promise(r => setTimeout(r, RETRY_WAITS[attempt]));
+    }
+    if (!res.ok) {
+      const busy = [429, 503].includes(res.status)
+        ? `\n（モデル「${model}」が混雑中です。少し待って再送するか、⚙️ で別のモデルに切り替えてください）` : '';
+      throw new Error('APIエラー: ' + (data.error?.message || res.status) + busy);
+    }
     const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
     if (!text) throw new Error('回答が空でした（安全フィルタ等の可能性）');
     return text;

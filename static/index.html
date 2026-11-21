@@ -455,8 +455,9 @@
   <div style="font-weight:700;margin-bottom:12px">⚙️ Gemini 設定</div>
   <label style="font-size:12px;color:var(--text2)">API キー（このブラウザにのみ保存されます）</label>
   <input id="setKey" type="password" autocomplete="off" placeholder="AIza..." style="width:100%;margin:4px 0 12px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
-  <label style="font-size:12px;color:var(--text2)">モデル</label>
-  <input id="setModel" type="text" style="width:100%;margin:4px 0 14px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
+  <label style="font-size:12px;color:var(--text2)">モデル（候補から選ぶか、名前を直接入力）</label>
+  <datalist id="modelPresets"></datalist>
+  <input id="setModel" type="text" list="modelPresets" style="width:100%;margin:4px 0 14px;padding:8px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px">
   <div style="border-top:1px solid var(--border);margin:4px 0 14px;padding-top:12px">
     <div style="font-weight:700;font-size:13px;margin-bottom:4px">🧭 意味検索（Gemini 埋め込み）</div>
     <div id="embStatus" style="font-size:12px;color:var(--text2);margin-bottom:6px"></div>
@@ -495,7 +496,11 @@
 <div id="chatPanel">
   <div class="chat-header">
     <span>🧠 Vault と対話 <span id="vaultStat" style="font-weight:400;font-size:12px;color:var(--muted);margin-left:6px"></span></span>
-    <button class="icon-btn" title="クリア" onclick="clearChat()">🗑</button>
+    <span style="display:flex;gap:6px;align-items:center">
+      <select id="quickModel" class="local-only" title="使うモデルを切り替え（混雑時は軽いモデルへ）" onchange="switchModel(this.value)"
+        style="display:none;max-width:170px;font-size:11px;padding:3px 4px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px"></select>
+      <button class="icon-btn" title="クリア" onclick="clearChat()">🗑</button>
+    </span>
   </div>
   <div id="chatMessages">
     <div class="msg ai">
@@ -557,6 +562,7 @@ async function init() {
   const tree = document.getElementById('fileTree');
   if (backend.mode === 'local') {
     document.querySelectorAll('.local-only').forEach(el => el.style.display = '');
+    renderModelPicker();
     backend.onProgress(msg => {
       if (msg) tree.innerHTML = `<div style="padding:16px;color:var(--text2);font-size:12px">⏳ ${esc(msg)}</div>`;
     });
@@ -656,7 +662,23 @@ async function buildEmb() {
 function saveSettings() {
   backend.saveSettings(document.getElementById('setKey').value, document.getElementById('setModel').value);
   document.getElementById('settingsDlg').close();
+  renderModelPicker();
   showToast('✅ 保存しました');
+}
+
+// ─── モデル切り替え（単体版のみ。サーバー版は main.py で固定） ───
+const MODEL_PRESETS = ['gemini-4-hydrogen', 'gemini-2.0-flash-lite'];
+function renderModelPicker() {
+  if (backend.mode !== 'local') return;
+  const cur = backend.getSettings().model;
+  const list = MODEL_PRESETS.includes(cur) ? MODEL_PRESETS : [cur, ...MODEL_PRESETS];
+  const sel = document.getElementById('quickModel');
+  sel.innerHTML = list.map(m => `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  document.getElementById('modelPresets').innerHTML = MODEL_PRESETS.map(m => `<option value="${esc(m)}">`).join('');
+}
+function switchModel(model) {
+  backend.saveSettings(backend.getSettings().key, model);
+  showToast('🔁 モデルを ' + model + ' に切り替えました');
 }
 
 // ─── File tree ──────────────────────────────────────

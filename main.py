@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import threading
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 from search import NoteSearcher
@@ -272,11 +274,25 @@ async def chat(req: ChatRequest):
         f"質問: {req.message}\n\n参考ノート:\n{context}"
     )
 
-    try:
-        response = _client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=prompt,
+    config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(
+            thinking_level="medium"  # "low", "medium", "high", "xhigh" から選択
         )
-        return {"answer": response.text, "sources": sources}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    )
+    # 503（混雑）/429（レート制限）は一時的なので、待ってから最大3回まで再試行する
+    retry_waits = [2, 5, 10]
+    for attempt in range(len(retry_waits) + 1):
+        try:
+            response = _client.models.generate_content(
+                model="gemini-4-hydrogen",
+                contents=prompt,
+                config=config,
+            )
+            return {"answer": response.text, "sources": sources}
+        except Exception as e:
+            msg = str(e)
+            transient = any(s in msg for s in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "high demand"))
+            if transient and attempt < len(retry_waits):
+                await asyncio.sleep(retry_waits[attempt])
+                continue
+            raise HTTPException(status_code=500, detail=msg)

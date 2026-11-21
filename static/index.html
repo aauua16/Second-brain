@@ -525,7 +525,15 @@ let currentPath = null;
 let allNotes    = [];
 let searchTimer = null;
 let chatHistory = [];   // [{role:'user'|'ai', text}]
-const MODEL_PRESETS = ['gemini-4-hydrogen', 'gemini-2.0-flash-lite'];   // 先頭がサーバー版の既定
+const MODEL_PRESETS = ['gemini-4-hydrogen', 'gemini-3.5-flash-lite'];   // 先頭がサーバー版の既定
+// 提供終了したモデル → 後継。保存済みの選択が古いままだと毎回エラーになるので置き換える
+const RETIRED_MODELS = { 'gemini-2.0-flash-lite': 'gemini-3.5-flash-lite' };
+try {
+  for (const k of ['second_brain_gemini_model', 'second_brain_server_model']) {
+    const v = localStorage.getItem(k);
+    if (v && RETIRED_MODELS[v]) localStorage.setItem(k, RETIRED_MODELS[v]);
+  }
+} catch {}
 
 // ─── Backend（サーバー版 / ブラウザ単体版） ────────────
 // file:// で開いたときはサーバー不要の単体版（local-backend.js）を使う
